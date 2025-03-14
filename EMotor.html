@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>3/6-Phase Motor Simulation – Star/Delta and Combined Views</title>
+  <!-- Load p5.js from a CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@latest/lib/p5.min.js"></script>
+  <style>
+    /* Center the canvas and style the layout */
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-family: sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+  </style>
+</head>
+<body>
+<script>
+// -------------------- Global Parameters --------------------
+let t = 0;                     // Time variable for the sine functions.
+let paused = false;            // Whether the simulation is frozen.
+let speed = 1.0;               // Speed multiplier.
+let direction = 1;             // Internal rotation direction.
+const baseTimeIncrement = 0.05;// Base time increment per frame.
+let stepTime;                  // Time increment for a single “step”.
+
+// -------------------- Trail Data for Combined R --------------------
+let combinedTrail = [];        // Array storing successive positions of the combined resultant R.
+let currentTrailColor;         // The color used to draw the current trail.
+let trailEnabled = true;       // Whether to draw the trail.
+
+// -------------------- Phase Configuration --------------------
+/*  
+   In 3‑phase mode, we have phases A, B, C at 0°, 120°, and 240°.
+   In 6‑phase mode we have two balanced sets:
+     • Star (uppercase): A, B, C at 0°, 120°, 240°.
+     • Delta (lowercase): defined by adding 120° to the star phases:
+         a = sin(t + 0 + 120°),
+         b = sin(t + 2π/3 + 120°),
+         c = sin(t + 4π/3 + 120°).
+   In an ideal system the delta set is a permutation of the star set so that when paired
+   (via a fixed mapping) the combined vectors (labeled “Ac”, “Ba”, “Cb”) add to 2*sin(t+θ)
+   in each direction (i.e. a constant–magnitude R).
+*/
+let numPhases = 3;             // 3 for 3‑phase mode; 6 for 6‑phase mode.
+let phaseLabels;               // For 3‑phase: ["A","B","C"]; for 6‑phase: ["A","a","B","b","C","c"].
+let cutoff = [];               // Boolean array indicating if a phase is "cut".
+
+// -------------------- On–Screen Button Variables --------------------
+let freezeButton, fasterButton, slowerButton;
+let randomCutOneButton, randomCutTwoButton, resetCutoffsButton;
+let swapRotationButton, stepButton, togglePhasesButton;
+let toggleTrailButton;         // Button to toggle the trail
+
+// -------------------- Setup --------------------
+function setup() {
+  createCanvas(600, 600);
+  stepTime = TWO_PI / 8;  // One step equals 1/8 of a full cycle.
+  colorMode(HSB, 360, 100, 100);
+  textAlign(CENTER, CENTER);
+  textSize(16);
+  initPhases();
+  currentTrailColor = color(random(360), 80, 90);
+  
+  // Create on–screen buttons.
+  freezeButton = createButton('Freeze');
+  freezeButton.position(10, height + 10);
+  freezeButton.mousePressed(togglePause);
+  
+  fasterButton = createButton('Faster');
+  fasterButton.position(90, height + 10);
+  fasterButton.mousePressed(increaseSpeed);
+  
+  slowerButton = createButton('Slower');
+  slowerButton.position(170, height + 10);
+  slowerButton.mousePressed(decreaseSpeed);
+  
+  randomCutOneButton = createButton('Random Cut One');
+  randomCutOneButton.position(10, height + 40);
+  randomCutOneButton.mousePressed(randomCutOne);
+  
+  randomCutTwoButton = createButton('Random Cut Two');
+  randomCutTwoButton.position(150, height + 40);
+  randomCutTwoButton.mousePressed(randomCutTwo);
+  
+  resetCutoffsButton = createButton('Reset Cuts');
+  resetCutoffsButton.position(290, height + 40);
+  resetCutoffsButton.mousePressed(function(){
+    resetCutoffs();
+    combinedTrail = [];
+    currentTrailColor = color(random(360), 80, 90);
+  });
+  
+  swapRotationButton = createButton('Swap Rotation');
+  swapRotationButton.position(10, height + 70);
+  swapRotationButton.mousePressed(swapRotation);
+  
+  stepButton = createButton('Step (when Frozen)');
+  stepButton.position(150, height + 70);
+  stepButton.mousePressed(stepTimeForward);
+  
+  togglePhasesButton = createButton('Switch to 6 Phases');
+  togglePhasesButton.position(290, height + 70);
+  togglePhasesButton.mousePressed(function(){
+    togglePhases();
+    combinedTrail = [];
+    currentTrailColor = color(random(360), 80, 90);
+  });
+  
+  toggleTrailButton = createButton('Toggle Trail');
+  toggleTrailButton.position(430, height + 70);
+  toggleTrailButton.mousePressed(toggleTrail);
+  
+  // Disable the context menu.
+  document.oncontextmenu = function() { return false; };
+}
+
+// -------------------- Dashed Line Helper --------------------
+function drawDashedLine(x1, y1, x2, y2, dashLength, gapLength) {
+  let distance = dist(x1, y1, x2, y2);
+  let dashCount = floor(distance / (dashLength + gapLength));
+  let angle = atan2(y2 - y1, x2 - x1);
+  for (let i = 0; i < dashCount; i++) {
+    let startX = x1 + i * (dashLength + gapLength) * cos(angle);
+    let startY = y1 + i * (dashLength + gapLength) * sin(angle);
+    let endX = startX + dashLength * cos(angle);
+    let endY = startY + dashLength * sin(angle);
+    line(startX, startY, endX, endY);
+  }
+  let remaining = distance - dashCount * (dashLength + gapLength);
+  if (remaining > dashLength) {
+    let startX = x1 + dashCount * (dashLength + gapLength) * cos(angle);
+    let startY = y1 + dashCount * (dashLength + gapLength) * sin(angle);
+    let endX = startX + dashLength * cos(angle);
+    let endY = startY + dashLength * sin(angle);
+    line(startX, startY, endX, endY);
+  }
+}
+
+// -------------------- 3‑Phase Drawing --------------------
+function draw3PhaseCircle(scaleFactor) {
+  noFill();
+  stroke(0);
+  strokeWeight(2);
+  ellipse(0, 0, 2*scaleFactor, 2*scaleFactor);
+  let fieldVectors = [];
+  for (let i = 0; i < 3; i++) {
+    let theta = i * TWO_PI / 3;
+    let amp = cutoff[i] ? 0 : sin(t + theta);
+    let len = amp * scaleFactor;
+    let vx = len * cos(theta);
+    let vy = len * sin(theta);
+    stroke((theta*180/PI) % 360, 80, 90);
+    strokeWeight(3);
+    line(0, 0, vx, vy);
+    drawPhaseArrowHead(vx, vy);
+    fill(0);
+    noStroke();
+    text(phaseLabels[i], vx * 1.1, vy * 1.1);
+    fieldVectors.push(createVector(vx, vy));
+  }
+  let R = createVector(0, 0);
+  for (let vec of fieldVectors) {
+    R.add(vec);
+  }
+  stroke(0);
+  strokeWeight(4);
+  line(0, 0, R.x, R.y);
+  drawArrowHead(R);
+  fill(0);
+  noStroke();
+  text("R", R.x * 1.1, R.y * 1.1);
+}
+
+// -------------------- 6‑Phase Drawing – Star Circle --------------------
+function drawStarCircle(scaleFactor) {
+  noFill();
+  stroke(0);
+  strokeWeight(1);
+  ellipse(0, 0, 2*scaleFactor, 2*scaleFactor);
+  let fieldVectors = [];
+  for (let k = 0; k < 3; k++) {
+    let theta = k * TWO_PI / 3;
+    let amp = cutoff[2*k] ? 0 : sin(t + theta);
+    let len = amp * scaleFactor;
+    let vx = len * cos(theta);
+    let vy = len * sin(theta);
+    stroke((theta*180/PI)%360, 80, 90);
+    strokeWeight(2);
+    line(0, 0, vx, vy);
+    drawPhaseArrowHead(vx, vy);
+    fill(0);
+    noStroke();
+    text(phaseLabels[2*k], vx * 1.1, vy * 1.1);
+    fieldVectors.push(createVector(vx, vy));
+  }
+  let R = createVector(0, 0);
+  for (let vec of fieldVectors) R.add(vec);
+  stroke(0);
+  strokeWeight(2);
+  drawDashedLine(0, 0, R.x, R.y, 5, 3);
+  drawArrowHead(R);
+  fill(0);
+  noStroke();
+  text("R*", R.x * 1.1, R.y * 1.1);
+}
+
+// -------------------- 6‑Phase Drawing – Delta Circle --------------------
+function drawDeltaCircle(scaleFactor) {
+  noFill();
+  stroke(0);
+  strokeWeight(1);
+  ellipse(0, 0, 2*scaleFactor, 2*scaleFactor);
+  let fieldVectors = [];
+  for (let k = 0; k < 3; k++) {
+    let index = 2*k+1;
+    let theta = k * TWO_PI / 3 + TWO_PI/3;  // Delta phases: star + 120°
+    let amp = cutoff[index] ? 0 : sin(t + theta);
+    let len = amp * scaleFactor;
+    let vx = len * cos(theta);
+    let vy = len * sin(theta);
+    stroke((theta*180/PI)%360, 80, 90);
+    strokeWeight(2);
+    line(0, 0, vx, vy);
+    drawPhaseArrowHead(vx, vy);
+    fill(0);
+    noStroke();
+    text(phaseLabels[index], vx * 1.1, vy * 1.1);
+    fieldVectors.push(createVector(vx, vy));
+  }
+  let R = createVector(0, 0);
+  for (let vec of fieldVectors) R.add(vec);
+  stroke(0);
+  strokeWeight(2);
+  drawDashedLine(0, 0, R.x, R.y, 5, 3);
+  drawArrowHead(R);
+  fill(0);
+  noStroke();
+  text("R#", R.x * 1.1, R.y * 1.1);
+}
+
+// -------------------- 6‑Phase Drawing – Combined Circle --------------------
+function drawCombinedCircle(scaleFactor) {
+  noFill();
+  stroke(0);
+  strokeWeight(1);
+  ellipse(0, 0, 2*scaleFactor, 2*scaleFactor);
+  let fieldVectors = [];
+  // Define fixed pairing: pairMapping = [[0,5], [2,1], [4,3]]
+  // Label pairs as "Ac", "Ba", "Cb" respectively.
+  let pairMapping = [[0,5], [2,1], [4,3]];
+  let combinedLabels = ["Ac", "Ba", "Cb"];
+  for (let k = 0; k < 3; k++) {
+    let theta = k * TWO_PI / 3;
+    let ampStar = cutoff[pairMapping[k][0]] ? 0 : sin(t + theta);
+    let ampDelta = cutoff[pairMapping[k][1]] ? 0 : sin(t + theta);
+    let combinedAmp = ampStar + ampDelta;  // Ideally 2*sin(t+theta)
+    let lenCombined = combinedAmp * scaleFactor;
+    let vx = lenCombined * cos(theta);
+    let vy = lenCombined * sin(theta);
+    stroke((theta*180/PI)%360, 80, 90);
+    strokeWeight(2);
+    line(0, 0, vx, vy);
+    drawArrowHead(createVector(vx,vy));
+    fill(0);
+    noStroke();
+    text(combinedLabels[k], vx * 1.1, vy * 1.1);
+    fieldVectors.push(createVector(vx, vy));
+  }
+  let R = createVector(0, 0);
+  for (let vec of fieldVectors) {
+    R.add(vec);
+  }
+  stroke(0);
+  strokeWeight(3);
+  line(0, 0, R.x, R.y);
+  drawArrowHead(R);
+  fill(0);
+  noStroke();
+  text("R", R.x * 1.1, R.y * 1.1);
+  
+  if (trailEnabled) {
+    combinedTrail.push(R.copy());
+    noFill();
+    stroke(currentTrailColor);
+    strokeWeight(2);
+    beginShape();
+    for (let pt of combinedTrail) {
+      vertex(pt.x, pt.y);
+    }
+    endShape();
+  }
+}
+
+// -------------------- Main Draw Loop --------------------
+function draw() {
+  background(255);
+  
+  if (numPhases === 3) {
+    // In 3‑phase mode, draw one large combined circle at the center.
+    push();
+    translate(width/2, height/2);
+    draw3PhaseCircle(150);
+    pop();
+  } else {
+    // In 6‑phase mode, draw three circles arranged vertically:
+    // Top: Star circle, Middle: Combined circle, Bottom: Delta circle.
+    push();
+    translate(width/2, height/2 - 150);
+    drawStarCircle(80);
+    pop();
+    
+    push();
+    translate(width/2, height/2);
+    drawCombinedCircle(80);
+    pop();
+    
+    push();
+    translate(width/2, height/2 + 150);
+    drawDeltaCircle(80);
+    pop();
+  }
+  
+  // ----- Display Interconnection Equation -----
+  resetMatrix();
+  fill(0);
+  noStroke();
+  textSize(16);
+  if (numPhases === 3) {
+    text("A + B + C = R", 10, 100);
+  } else {
+    text("A + a + B + b + C + c = R", 10, 100);
+  }
+  
+  // ----- Display Additional Info (Top–Left) -----
+  text('Speed: ' + nf(speed, 1, 2), 10, 20);
+  text('Rotation: ' + (direction > 0 ? "CCW" : "CW"), 10, 40);
+  text('Phases: ' + numPhases, 10, 60);
+  
+  // ----- Display Mouse/Keyboard Legend (Top–Right) -----
+  push();
+  resetMatrix();
+  textAlign(LEFT, TOP);
+  textSize(14);
+  let legendText = "Mouse/Keyboard Controls:\n" +
+                   "Space: Toggle freeze\n" +
+                   "Left Click (inside circle): Toggle freeze\n" +
+                   "Middle Click: if frozen → step; if running → swap rotation\n" +
+                   "Mouse Wheel: Adjust speed\n" +
+                   "Double Click: Toggle 3/6-phase mode";
+  text(legendText, width - 220, 10);
+  pop();
+  
+  // ----- Draw Signature/Logo (Bottom–Right) -----
+  push();
+  resetMatrix();
+  textAlign(RIGHT, BOTTOM);
+  textSize(12);
+  let logoText = "Simulation of a 3 phase motor rotation,\n" +
+                 "ABC are the phases in star, abc in delta,\n" +
+                 "and R is the resulting EM force induced in the motor.\n" +
+                 "By Merkur Beqiri, January 2025, assisted by AI coding";
+  text(logoText, width - 10, height - 10);
+  pop();
+  
+  // ----- Update Time (if not paused) -----
+  if (!paused) {
+    t += direction * baseTimeIncrement * speed;
+  }
+}
+
+// -------------------- Drawing Helper Functions --------------------
+function drawArrowHead(vec) {
+  const arrowSize = 10;
+  push();
+  translate(vec.x, vec.y);
+  let angle = atan2(vec.y, vec.x);
+  rotate(angle);
+  line(0, 0, -arrowSize, -arrowSize/2);
+  line(0, 0, -arrowSize, arrowSize/2);
+  pop();
+}
+
+function drawPhaseArrowHead(vx, vy) {
+  const arrowSize = 8;
+  let angle = atan2(vy, vx);
+  push();
+  translate(vx, vy);
+  rotate(angle);
+  line(0, 0, -arrowSize, -arrowSize/2);
+  line(0, 0, -arrowSize, arrowSize/2);
+  pop();
+}
+
+// -------------------- Initialization Function --------------------
+function initPhases() {
+  if (numPhases === 3) {
+    phaseLabels = ["A", "B", "C"];
+    cutoff = [];
+    for (let i = 0; i < 3; i++) {
+      cutoff.push(false);
+    }
+  } else {
+    phaseLabels = ["A", "a", "B", "b", "C", "c"];
+    cutoff = [];
+    for (let i = 0; i < 6; i++) {
+      cutoff.push(false);
+    }
+  }
+  combinedTrail = [];
+}
+
+// -------------------- Control Functions --------------------
+function togglePause() {
+  paused = !paused;
+  if (freezeButton) {
+    freezeButton.html(paused ? 'Unfreeze' : 'Freeze');
+  }
+}
+
+function increaseSpeed() {
+  speed *= 1.2;
+}
+
+function decreaseSpeed() {
+  speed /= 1.2;
+}
+
+function randomCutOne() {
+  let total = numPhases;
+  if (total === 0) return;
+  let index = floor(random(total));
+  cutoff[index] = true;
+}
+
+function randomCutTwo() {
+  let total = numPhases;
+  if (total < 2) return;
+  let indices = [];
+  for (let i = 0; i < total; i++) {
+    indices.push(i);
+  }
+  indices = shuffle(indices);
+  cutoff[indices[0]] = true;
+  cutoff[indices[1]] = true;
+}
+
+function resetCutoffs() {
+  for (let i = 0; i < cutoff.length; i++) {
+    cutoff[i] = false;
+  }
+  combinedTrail = [];
+  currentTrailColor = color(random(360), 80, 90);
+}
+
+function swapRotation() {
+  direction *= -1;
+}
+
+function stepTimeForward() {
+  if (paused) {
+    t += direction * stepTime;
+  }
+}
+
+function togglePhases() {
+  if (numPhases === 3) {
+    numPhases = 6;
+    togglePhasesButton.html('Switch to 3 Phases');
+  } else {
+    numPhases = 3;
+    togglePhasesButton.html('Switch to 6 Phases');
+  }
+  initPhases();
+  combinedTrail = [];
+  currentTrailColor = color(random(360), 80, 90);
+}
+
+function toggleTrail() {
+  trailEnabled = !trailEnabled;
+  if (!trailEnabled) {
+    combinedTrail = [];
+  }
+  toggleTrailButton.html(trailEnabled ? 'Trail On' : 'Trail Off');
+}
+
+// -------------------- Event Handlers --------------------
+function keyPressed() {
+  if (key === ' ') {
+    togglePause();
+  }
+}
+
+function mousePressed() {
+  let d = dist(mouseX, mouseY, width/2, height/2);
+  if (mouseButton === LEFT) {
+    if (d < 150) {
+      togglePause();
+    }
+  } else if (mouseButton === CENTER) {
+    if (paused) {
+      stepTimeForward();
+    } else {
+      swapRotation();
+    }
+  }
+}
+
+function mouseWheel(event) {
+  if (event.delta < 0) {
+    increaseSpeed();
+  } else if (event.delta > 0) {
+    decreaseSpeed();
+  }
+  return false;
+}
+
+function doubleClicked() {
+  togglePhases();
+  return false;
+}
+</script>
+</body>
+</html>
