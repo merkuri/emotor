@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>3/6-Phase Motor Simulation – Mobile with Speed Slider</title>
+  <!-- Ensure proper scaling on mobile devices -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Load p5.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.5.0/lib/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #fff;
+      font-family: sans-serif;
+    }
+    /* The controls container at the bottom */
+    #controls {
+      position: fixed;
+      bottom: 0;
+      width: 100%;
+      text-align: center;
+      background: #eee;
+      padding: 5px 0;
+      z-index: 10;
+    }
+    button, input[type="range"] {
+      margin: 4px;
+      padding: 6px 10px;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+<div id="controls"></div>
+<script>
+// -------------------- Global Parameters --------------------
+let t = 0;                     // Time variable.
+let paused = false;            // Simulation paused flag.
+let speed = 1.0;               // Speed multiplier.
+let direction = 1;             // Rotation direction (1: default, -1: swapped).
+const baseTimeIncrement = 0.05;
+let stepTime;                  // Time step increment.
+
+let combinedTrail = [];        // Trail for the combined resultant R.
+let currentTrailColor;         // Current trail color.
+let trailEnabled = true;       // Whether to show the trail.
+
+let numPhases = 3;             // 3-phase or 6-phase mode.
+let phaseLabels;               // ["A","B","C"] in 3-phase; ["A","a","B","b","C","c"] in 6-phase.
+let cutoff = [];               // Array of booleans: true means that phase is cut.
+
+let speedSlider;               // Slider to control speed.
+
+// -------------------- Setup --------------------
+function setup() {
+  // Create a canvas that fills the width and 80% of the height.
+  createCanvas(windowWidth, windowHeight * 0.8);
+  stepTime = TWO_PI / 8;
+  colorMode(HSB, 360, 100, 100);
+  textAlign(CENTER, CENTER);
+  textSize(16);
+  initPhases();
+  currentTrailColor = color(random(360), 80, 90);
+  
+  // Create UI controls and attach them to the "controls" div.
+  speedSlider = createSlider(0.1, 5, speed, 0.1);
+  speedSlider.parent("controls");
+  speedSlider.style('width', '140px');
+  
+  let freezeButton = createButton('Freeze/Unfreeze');
+  freezeButton.parent("controls");
+  freezeButton.mousePressed(togglePause);
+  
+  let randomCutOneButton = createButton('Random Cut One');
+  randomCutOneButton.parent("controls");
+  randomCutOneButton.mousePressed(randomCutOne);
+  
+  let randomCutTwoButton = createButton('Random Cut Two');
+  randomCutTwoButton.parent("controls");
+  randomCutTwoButton.mousePressed(randomCutTwo);
+  
+  let resetCutoffsButton = createButton('Reset Cuts');
+  resetCutoffsButton.parent("controls");
+  resetCutoffsButton.mousePressed(() => {
+    resetCutoffs();
+    combinedTrail = [];
+    currentTrailColor = color(random(360), 80, 90);
+  });
+  
+  let swapRotationButton = createButton('Swap Rotation');
+  swapRotationButton.parent("controls");
+  swapRotationButton.mousePressed(swapRotation);
+  
+  let stepButton = createButton('Step');
+  stepButton.parent("controls");
+  stepButton.mousePressed(stepTimeForward);
+  
+  let togglePhasesButton = createButton('Toggle 3/6 Phase');
+  togglePhasesButton.parent("controls");
+  togglePhasesButton.mousePressed(() => {
+    togglePhases();
+    combinedTrail = [];
+    currentTrailColor = color(random(360), 80, 90);
+  });
+  
+  let toggleTrailButton = createButton('Toggle Trail');
+  toggleTrailButton.parent("controls");
+  toggleTrailButton.mousePressed(toggleTrail);
+  
+  // Disable context menu to avoid interference.
+  document.oncontextmenu = () => false;
+}
+
+// -------------------- Window Resized --------------------
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight * 0.8);
+  // Reposition slider if needed.
+  speedSlider.position(windowWidth - 160, 50);
+}
+
+// -------------------- Initialization --------------------
+function initPhases() {
+  if (numPhases === 3) {
+    phaseLabels = ["A", "B", "C"];
+    cutoff = [false, false, false];
+  } else {
+    phaseLabels = ["A", "a", "B", "b", "C", "c"];
+    cutoff = [false, false, false, false, false, false];
+  }
+  combinedTrail = [];
+}
+
+// -------------------- Drawing Functions --------------------
+
+// Draw dashed line helper.
+function drawDashedLine(x1, y1, x2, y2, dashLength, gapLength) {
+  let distance = dist(x1, y1, x2, y2);
+  let dashCount = floor(distance / (dashLength + gapLength));
+  let angle = atan2(y2 - y1, x2 - x1);
+  for (let i = 0; i < dashCount; i++) {
+    let startX = x1 + i * (dashLength + gapLength) * cos(angle);
+    let startY = y1 + i * (dashLength + gapLength) * sin(angle);
+    let endX = startX + dashLength * cos(angle);
+    let endY = startY + dashLength * sin(angle);
+    line(startX, startY, endX, endY);
+  }
+  let remaining = distance - dashCount * (dashLength + gapLength);
+  if (remaining > dashLength) {
+    let startX = x1 + dashCount * (dashLength + gapLength) * cos(angle);
+    let startY = y1 + dashCount * (dashLength + gapLength) * sin(angle);
+    let endX = startX + dashLength * cos(angle);
+    let endY = startY + dashLength * sin(angle);
+    line(startX, startY, endX, endY);
+  }
+}
+
+// Draw arrowhead.
+function drawArrowHead(vec) {
+  const arrowSize = 10;
+  push();
+  translate(vec.x, vec.y);
+  let angle = atan2(vec.y, vec.x);
+  rotate(angle);
+  line(0, 0, -arrowSize, -arrowSize/2);
+  line(0, 0, -arrowSize, arrowSize/2);
+  pop();
+}
+
+// Draw small arrowhead at phase tip.
+function drawPhaseArrowHead(vx, vy) {
+  const arrowSize = 8;
+  let angle = atan2(vy, vx);
+  push();
+  translate(vx, vy);
+  rotate(angle);
+  line(0, 0, -arrowSize, -arrowSize/2);
+  line(0, 0, -arrowSize, arrowSize/2);
+  pop();
+}
+
+// 3-phase drawing (one large circle).
+function draw3PhaseCircle(scaleFactor) {
+  noFill();
+  stroke(0);
+  strokeWeight(2);
+  ellipse(0, 0, 2 * scaleFactor, 2 * scaleFactor);
+  let fieldVectors = [];
+  for (let i = 0; i < 3; i++) {
+    let theta = i * TWO_PI / 3;
+    let amp = cutoff[i] ? 0 : sin(t + theta);
+    let len = amp * scaleFactor;
+    let vx = len * cos(theta);
+    let vy = len * sin(theta);
+    stroke((theta * 180 / PI) % 360, 80, 90);
+    strokeWeight(3);
+    line(0, 0, vx, vy);
+    drawPhaseArrowHead(vx, vy);
+    fill(0);
+    noStroke();
+    text(phaseLabels[i], vx * 1.1, vy * 1.1);
+    fieldVectors.push(createVect
